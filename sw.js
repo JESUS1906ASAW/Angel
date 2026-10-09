@@ -1,5 +1,5 @@
-const CN       = 'angel-v1';       // caché de datos/red
-const SHELL_CN = 'angel-shell-v1'; // caché del app shell
+const CN       = 'angel-v2';       // caché de datos/red
+const SHELL_CN = 'angel-shell-v2'; // caché del app shell
 // IMPORTANTE: sube este número (v1, v2, v3...) en cada despliegue que
 // incluya cambios de verdad. El navegador solo se entera de que hay un
 // sw.js nuevo si el ARCHIVO cambia byte a byte; si solo tocas index.html

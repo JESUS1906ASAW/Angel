@@ -3854,7 +3854,9 @@ window.doRegister=async()=>{
   try{
     const cred=await createUserWithEmailAndPassword(auth,email,pass);
     await updateProfile(cred.user,{displayName:nom});
-    await setDoc(doc(db,'usuarios',cred.user.uid),{nombre:nom,email,uid:cred.user.uid,tipo:'trabajador',creado:serverTimestamp()});
+    // Sin await: si la base de datos tarda, la escritura queda en cola y se sube sola.
+    setDoc(doc(db,'usuarios',cred.user.uid),{nombre:nom,email,uid:cred.user.uid,tipo:'trabajador',creado:serverTimestamp()}).catch(e=>console.warn('perfil',e));
+    try{localStorage.setItem('angel_cud_'+cred.user.uid,JSON.stringify({nombre:nom,email,uid:cred.user.uid,tipo:'trabajador'}));}catch(_){}
     // Lanzar onboarding de nuevo usuario
     _onboardingNuevoUsuario();
   }catch(e){setAuthErr(errMsg(e.code));btn.disabled=false;btn.textContent='Crear cuenta';}
@@ -4196,22 +4198,39 @@ const _ocultarSplash=()=>{
 };
 // Salvaguarda: si algo tarda demasiado (sin red, error de auth...), no dejar al usuario
 // atrapado en la pantalla de carga indefinidamente.
-setTimeout(_ocultarSplash,7000);
+// Promesa con tiempo máximo: si Firebase no responde, seguimos con lo que haya.
+const _conTimeout=(p,ms)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),ms))]);
+let _authResuelto=false;
+setTimeout(()=>{
+  if(_authResuelto){ _ocultarSplash(); return; }
+  // Firebase aún no ha contestado: en vez de una pantalla en blanco, explicar y dar salida.
+  const sp=document.getElementById('splashScreen'); if(!sp) return;
+  if(document.getElementById('splashMsg')) return;
+  const m=document.createElement('div'); m.id='splashMsg';
+  m.style.cssText='color:rgba(255,255,255,.75);font:600 13px/1.5 Inter,system-ui,sans-serif;text-align:center;max-width:280px;padding:0 20px';
+  m.innerHTML='Está tardando más de lo normal en conectar…<br><span style="opacity:.6;font-weight:500">Comprueba tu conexión a internet.</span><br><button onclick="location.reload()" style="margin-top:14px;background:#fff;color:#000;border:none;border-radius:12px;padding:10px 22px;font:800 13px Inter,system-ui,sans-serif;cursor:pointer">Reintentar</button>';
+  sp.appendChild(m);
+},7000);
 
 onAuthStateChanged(auth,async user=>{
+  _authResuelto=true;
   if(user){
     CU=user;
-    // getDoc usa caché automáticamente cuando no hay red (gracias a persistentLocalCache)
+    // getDoc usa caché automáticamente cuando no hay red (gracias a persistentLocalCache).
+    // Con tiempo máximo: si la base de datos no contesta, se entra igual con los
+    // últimos datos guardados en este móvil y no se queda la pantalla en blanco.
     try {
-      const snap=await getDoc(doc(db,'usuarios',user.uid));
-      if(snap.exists()){CUD=snap.data()}
+      const snap=await _conTimeout(getDoc(doc(db,'usuarios',user.uid)),5000);
+      if(snap.exists()){CUD=snap.data(); try{localStorage.setItem('angel_cud_'+user.uid,JSON.stringify(CUD));}catch(_){}}
       else{CUD={nombre:user.displayName||'Usuario',tipo:'trabajador'}}
     } catch(e) {
-      // Sin red y sin caché: usar datos mínimos del auth
-      CUD={nombre:user.displayName||user.email?.split('@')[0]||'Usuario',tipo:'trabajador'};
+      let guardado=null; try{guardado=JSON.parse(localStorage.getItem('angel_cud_'+user.uid)||'null');}catch(_){}
+      CUD=guardado||{nombre:user.displayName||user.email?.split('@')[0]||'Usuario',tipo:'trabajador'};
+      if(e&&e.message==='timeout') console.warn('[Ángel] Firestore no responde: ¿está creada la base de datos?');
     }
     $('authWrap').style.display='none';
     $('app').style.display='flex';
+    document.getElementById('splashMsg')?.remove();
     iniciarApp();
     // Comprobar bloqueo inmediatamente (sin retardo)
     _lockInicializar();
@@ -4223,6 +4242,7 @@ onAuthStateChanged(auth,async user=>{
     $('loginWrap').style.display='flex';
     setAuthErr('');
   }
+  document.getElementById('splashMsg')?.remove();
   _ocultarSplash();
 });
 
@@ -4245,13 +4265,13 @@ const iniciarApp=async()=>{
       const lastGid = localStorage.getItem('angel_ultimo_grupo_'+CU.uid);
       let candidateId = lastGid || null;
       if(!candidateId && navigator.onLine){
-        const gSnap = await getDocs(query(collection(db,'grupos'),where('miembros','array-contains',CU.uid)));
+        const gSnap = await _conTimeout(getDocs(query(collection(db,'grupos'),where('miembros','array-contains',CU.uid))),8000);
         if(gSnap.docs.length===1) candidateId = gSnap.docs[0].id;
       }
       if(candidateId){
         let gData = _lcLoad('grupo', candidateId);
         if(!gData && navigator.onLine){
-          const snap = await getDoc(doc(db,'grupos',candidateId));
+          const snap = await _conTimeout(getDoc(doc(db,'grupos',candidateId)),8000);
           if(snap.exists()){
             const d = snap.data();
             if((d.miembros||[]).includes(CU.uid)){ gData = d; _lcSave('grupo',candidateId,d); }
@@ -4278,14 +4298,14 @@ const iniciarApp=async()=>{
       // drawer se actualiza dinámicamente al abrirlo
 
       // Cargar datos del grupo en paralelo ANTES de renderizar
-      const [cliSnap, partSnap, mantSnap, pSnap, mpSnap, ppfSnap] = await Promise.all([
+      const [cliSnap, partSnap, mantSnap, pSnap, mpSnap, ppfSnap] = await _conTimeout(Promise.all([
         getDocs(collection(db,'grupos',CGID,'clientes')),
         getDocs(collection(db,'grupos',CGID,'partes')),
         getDocs(collection(db,'grupos',CGID,'mantenimientos')),
         getDocs(collection(db,'grupos',CGID,'plantillas')),
         getDocs(collection(db,'grupos',CGID,'mantPlantillas')),
         getDocs(collection(db,'grupos',CGID,'partePlantillasFull')),
-      ]);
+      ]),10000);
       allClientes        = cliSnap.docs.map(d=>({id:d.id,...d.data()}));
       allPartes          = partSnap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>_tsN(b.creado)-_tsN(a.creado));
       allMantenimientos  = mantSnap.docs.map(d=>({id:d.id,...d.data()}));
